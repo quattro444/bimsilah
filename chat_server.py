@@ -1,12 +1,12 @@
-import socket
-import threading
+import asyncio
+import websockets
 import json
 import os
 
 USERS_FILE = "users.json"
 MESSAGES_FILE = "messages.json"
 
-# === Utility per salvataggio dati ===
+# === Utility per file ===
 def load_data(file, default):
     if os.path.exists(file):
         with open(file, "r") as f:
@@ -19,99 +19,97 @@ def save_data(file, data):
 
 users = load_data(USERS_FILE, {})
 messages = load_data(MESSAGES_FILE, {})
+clients = {}  # {websocket: email}
 
-clients = {}  # {conn: email}
+
+async def register(ws):
+    await ws.send("Inserisci email:")
+    email = await ws.recv()
+    if email in users:
+        await ws.send("⚠️ Email già registrata.")
+        return None
+
+    await ws.send("Inserisci password:")
+    password = await ws.recv()
+
+    users[email] = {"password": password}
+    save_data(USERS_FILE, users)
+    messages[email] = []
+    save_data(MESSAGES_FILE, messages)
+
+    await ws.send("✅ Registrazione completata!")
+    return email
 
 
-# === Gestione client ===
-def handle_client(conn, addr):
+async def login(ws):
+    await ws.send("Email:")
+    email = await ws.recv()
+    await ws.send("Password:")
+    password = await ws.recv()
+
+    if email not in users or users[email]["password"] != password:
+        await ws.send("❌ Credenziali errate.")
+        return None
+
+    await ws.send("✅ Login effettuato!")
+    return email
+
+
+async def broadcast(message, sender=None):
+    for client in list(clients.keys()):
+        if client != sender:
+            try:
+                await client.send(message)
+            except:
+                pass
+
+
+async def handler(ws):
+    await ws.send("Benvenuto! Vuoi fare [login/registrati]?")
+    choice = await ws.recv()
+
+    email = None
+    if choice == "registrati":
+        email = await register(ws)
+    elif choice == "login":
+        email = await login(ws)
+    else:
+        await ws.send("❌ Scelta non valida.")
+        return
+
+    if not email:
+        return
+
+    clients[ws] = email
+    await broadcast(f"🔵 {email} si è connesso.", ws)
+
+    # Messaggi non letti
+    if messages.get(email):
+        await ws.send("📥 I tuoi messaggi non letti:")
+        for msg in messages[email]:
+            await ws.send(f"{msg['da']}: {msg['testo']}")
+        messages[email] = []
+        save_data(MESSAGES_FILE, messages)
+
     try:
-        conn.send("Benvenuto! Vuoi fare [login/registrati]? ".encode("utf-8"))
-        choice = conn.recv(1024).decode("utf-8").strip()
-
-        email = None
-        if choice == "registrati":
-            conn.send("Inserisci email: ".encode("utf-8"))
-            email = conn.recv(1024).decode("utf-8").strip()
-            if email in users:
-                conn.send("⚠️ Email già registrata.\n".encode("utf-8"))
-                conn.close()
-                return
-            conn.send("Inserisci password: ".encode("utf-8"))
-            password = conn.recv(1024).decode("utf-8").strip()
-            users[email] = {"password": password}
-            save_data(USERS_FILE, users)
-            messages[email] = []
-            save_data(MESSAGES_FILE, messages)
-            conn.send("✅ Registrazione completata!\n".encode("utf-8"))
-
-        elif choice == "login":
-            conn.send("Email: ".encode("utf-8"))
-            email = conn.recv(1024).decode("utf-8").strip()
-            conn.send("Password: ".encode("utf-8"))
-            password = conn.recv(1024).decode("utf-8").strip()
-            if email not in users or users[email]["password"] != password:
-                conn.send("❌ Credenziali errate.\n".encode("utf-8"))
-                conn.close()
-                return
-            conn.send("✅ Login effettuato!\n".encode("utf-8"))
-
-        else:
-            conn.send("❌ Scelta non valida.\n".encode("utf-8"))
-            conn.close()
-            return
-
-        # Salviamo il client
-        clients[conn] = email
-        broadcast(f"🔵 {email} si è connesso alla chat.", conn)
-
-        # Mostriamo messaggi non letti
-        if email in messages and messages[email]:
-            conn.send("📥 I tuoi messaggi non letti:\n".encode("utf-8"))
-            for msg in messages[email]:
-                conn.send(f"{msg['da']}: {msg['testo']}\n".encode("utf-8"))
-            messages[email] = []
-            save_data(MESSAGES_FILE, messages)
-
-        # Ciclo ricezione messaggi
-        while True:
-            msg = conn.recv(1024).decode("utf-8")
-            if not msg:
-                break
+        async for msg in ws:
             if msg.lower() == "exit":
                 break
-            # Inoltra a tutti
-            broadcast(f"{email}: {msg}", conn)
-
+            await broadcast(f"{email}: {msg}", ws)
     except:
         pass
     finally:
-        if conn in clients:
-            broadcast(f"🔴 {clients[conn]} si è disconnesso.", conn)
-            del clients[conn]
-        conn.close()
+        if ws in clients:
+            await broadcast(f"🔴 {clients[ws]} si è disconnesso.", ws)
+            del clients[ws]
 
 
-def broadcast(msg, sender_conn=None):
-    for client in list(clients.keys()):
-        try:
-            if client != sender_conn:
-                client.send((msg + "\n").encode("utf-8"))
-        except:
-            client.close()
-            del clients[client]
-
-
-def main():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(("0.0.0.0", 5555))  # ascolta su porta 5555
-    server.listen()
-    print("[SERVER IN ASCOLTO SU PORTA 5555]")
-    while True:
-        conn, addr = server.accept()
-        thread = threading.Thread(target=handle_client, args=(conn, addr))
-        thread.start()
+async def main():
+    port = int(os.environ.get("PORT", 10000))  # Render userà questa porta
+    async with websockets.serve(handler, "0.0.0.0", port):
+        print(f"[SERVER AVVIATO SU PORTA {port}]")
+        await asyncio.Future()  # per tenere il server attivo
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
