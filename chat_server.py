@@ -6,22 +6,29 @@ import os
 USERS_FILE = "users.json"
 MESSAGES_FILE = "messages.json"
 
+
 # === Utility per file ===
 def load_data(file, default):
     if os.path.exists(file):
-        with open(file, "r") as f:
-            return json.load(f)
+        try:
+            with open(file, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return default
     return default
+
 
 def save_data(file, data):
     with open(file, "w") as f:
         json.dump(data, f, indent=2)
+
 
 users = load_data(USERS_FILE, {})
 messages = load_data(MESSAGES_FILE, {})
 clients = {}  # {websocket: email}
 
 
+# === Registrazione/Login ===
 async def register(ws):
     await ws.send("Inserisci email:")
     email = await ws.recv()
@@ -55,6 +62,7 @@ async def login(ws):
     return email
 
 
+# === Gestione broadcast ===
 async def broadcast(message, sender=None):
     for client in list(clients.keys()):
         if client != sender:
@@ -64,6 +72,7 @@ async def broadcast(message, sender=None):
                 pass
 
 
+# === Gestione connessione client ===
 async def handler(ws):
     await ws.send("Benvenuto! Vuoi fare [login/registrati]?")
     choice = await ws.recv()
@@ -104,11 +113,12 @@ async def handler(ws):
             del clients[ws]
 
 
+# === Main server ===
 async def main():
-    port = int(os.environ.get("PORT", 10000))  # Render userà questa porta
+    port = int(os.environ.get("PORT") or 10000)  # Fix porta vuota
     async with websockets.serve(handler, "0.0.0.0", port):
         print(f"[SERVER AVVIATO SU PORTA {port}]")
-        await asyncio.Future()  # per tenere il server attivo
+        await asyncio.Future()  # server sempre attivo
 
 
 if __name__ == "__main__":
